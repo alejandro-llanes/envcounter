@@ -1,0 +1,12 @@
+[Unit]
+Description=envcounter pool daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/envcounterd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

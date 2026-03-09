@@ -1,0 +1,25 @@
+[package]
+name = "envcounter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+directories = "6"
+
+[lib]
+name = "envcounter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "envcounterd"
+path = "src/bin/envcounterd.rs"
+
+[[bin]]
+name = "envcounter-cli"
+path = "src/bin/envcounter.rs"

@@ -1,0 +1,312 @@
+# envcounter
+
+A lightweight Linux daemon that manages **counter pools** and **UUID-v4 pools** over a Unix socket. Create named pools, read auto-incrementing counters or generate unique UUIDs, and let the daemon handle persistence across restarts.
+
+envcounter is composed of two binaries:
+
+- **`envcounterd`** — the background daemon that holds pool state in memory, listens on a Unix socket, and persists state to disk on shutdown.
+- **`envcounter-cli`** — the command-line client that talks to the daemon.
+
+## Features
+
+- **Counter pools** — auto-incrementing integer counters with configurable step and initial value.
+- **UUID-v4 pools** — generate cryptographically random UUIDs on demand.
+- **Persistent state** — on SIGTERM/SIGINT the daemon saves all pool state to disk and restores it on next startup. No data loss across service restarts or system reboots.
+- **Unix socket IPC** — fast, local-only communication via `$XDG_RUNTIME_DIR/envcounter.sock`. No network exposure.
+- **Async and concurrent** — built on Tokio; handles multiple simultaneous clients.
+- **Systemd user service** — runs unprivileged under your user session. No root required.
+- **Multiple output formats** — list pools as an aligned table or as JSON for scripting.
+
+## Installation
+
+### From source
+
+Requires Rust 1.85+ (edition 2024).
+
+```sh
+git clone https://github.com/youruser/envcounter.git
+cd envcounter
+cargo build --release
+```
+
+The binaries will be at `target/release/envcounterd` and `target/release/envcounter-cli`.
+
+To install them into `~/.cargo/bin`:
+
+```sh
+cargo install --path .
+```
+
+### Systemd user service (optional)
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp contrib/envcounterd.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now envcounterd
+```
+
+Check status:
+
+```sh
+systemctl --user status envcounterd
+```
+
+If you prefer running manually:
+
+```sh
+envcounterd
+```
+
+## Usage
+
+### Counter pools
+
+Counters hold an integer value that increments by a configurable step on every `read`.
+
+#### Create a counter
+
+```sh
+envcounter-cli counter new <name> [--step <n>] [--initial <n>]
+```
+
+- `--step` (default: `1`) — how much the counter increments on each read.
+- `--initial` (default: `0`) — the starting value.
+
+```sh
+# Simple counter starting at 0, incrementing by 1
+envcounter-cli counter new request_count
+
+# Counter starting at 1000, incrementing by 100
+envcounter-cli counter new batch_id --step 100 --initial 1000
+```
+
+#### Read (get and increment)
+
+Returns the current value, then increments the counter by its step.
+
+```sh
+envcounter-cli counter read batch_id
+# 1000
+envcounter-cli counter read batch_id
+# 1100
+envcounter-cli counter read batch_id
+# 1200
+```
+
+#### Seek (get without incrementing)
+
+Returns the current value without changing it. Useful for inspecting state.
+
+```sh
+envcounter-cli counter seek batch_id
+# 1300
+envcounter-cli counter seek batch_id
+# 1300  (unchanged)
+```
+
+#### Reset
+
+Resets the counter back to its initial value.
+
+```sh
+envcounter-cli counter reset batch_id
+envcounter-cli counter seek batch_id
+# 1000
+```
+
+#### Rename
+
+```sh
+envcounter-cli counter rename batch_id job_id
+```
+
+#### Remove
+
+```sh
+envcounter-cli counter rm job_id
+```
+
+### UUID pools
+
+UUID pools generate a new random UUID-v4 on every read. They have no mutable state — they exist as named entry points for UUID generation.
+
+#### Create a UUID pool
+
+```sh
+envcounter-cli uuid new session_ids
+```
+
+#### Read (generate a UUID)
+
+```sh
+envcounter-cli uuid read session_ids
+# 3f8a92c1-7b4d-4e2f-a891-5c3d7e8f1b2a
+envcounter-cli uuid read session_ids
+# a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d
+```
+
+Every call returns a unique UUID.
+
+#### Remove
+
+```sh
+envcounter-cli uuid rm session_ids
+```
+
+### Listing pools
+
+```sh
+envcounter-cli list
+```
+
+```
+NAME          TYPE     DETAILS
+batch_id      counter  value=1200 step=100 initial=1000
+request_count counter  value=5 step=1 initial=0
+session_ids   uuid     -
+```
+
+#### Filter by type
+
+```sh
+envcounter-cli list --type counter
+```
+
+```
+NAME          TYPE     DETAILS
+batch_id      counter  value=1200 step=100 initial=1000
+request_count counter  value=5 step=1 initial=0
+```
+
+#### JSON output
+
+```sh
+envcounter-cli list --format json
+```
+
+```json
+[
+  {
+    "name": "batch_id",
+    "type": "counter",
+    "value": 1200,
+    "step": 100,
+    "initial": 1000
+  },
+  {
+    "name": "session_ids",
+    "type": "uuid"
+  }
+]
+```
+
+Combine both flags:
+
+```sh
+envcounter-cli list --format json --type uuid
+```
+
+## Use cases
+
+### Sequential IDs in shell scripts
+
+Generate unique, sequential identifiers without relying on external services or file-based locks.
+
+```sh
+#!/bin/bash
+envcounter-cli counter new deploy_id --initial 1 2>/dev/null
+ID=$(envcounter-cli counter read deploy_id)
+echo "Starting deployment #${ID}..."
+```
+
+### Batch processing
+
+Use a counter with a large step to partition work across ranges.
+
+```sh
+envcounter-cli counter new chunk_offset --step 10000 --initial 0
+
+# Worker 1 gets offset 0
+OFFSET=$(envcounter-cli counter read chunk_offset)
+process_records --offset "$OFFSET" --limit 10000
+
+# Worker 2 gets offset 10000
+OFFSET=$(envcounter-cli counter read chunk_offset)
+process_records --offset "$OFFSET" --limit 10000
+```
+
+### Unique request IDs
+
+Embed a UUID in every outgoing request for distributed tracing.
+
+```sh
+envcounter-cli uuid new trace_ids
+
+curl -H "X-Request-ID: $(envcounter-cli uuid read trace_ids)" https://api.example.com/data
+```
+
+### CI/CD build numbers
+
+A persistent, monotonically increasing build counter that survives reboots.
+
+```sh
+envcounter-cli counter new build_number --initial 1
+BUILD=$(envcounter-cli counter read build_number)
+docker build -t myapp:build-${BUILD} .
+```
+
+### Templating and environment variables
+
+Use `envcounter-cli` in subshells to inject dynamic values:
+
+```sh
+export REQUEST_ID=$(envcounter-cli uuid read req_pool)
+export SEQ_NUM=$(envcounter-cli counter read seq)
+envsubst < config.template > config.yaml
+```
+
+## Architecture
+
+```
+envcounter-cli ──Unix socket──▶ envcounterd
+                                   │
+                            ┌──────┴──────┐
+                            │  AppState   │
+                            │  (RwLock)   │
+                            ├─────────────┤
+                            │ pool_a: Ctr │
+                            │ pool_b: Uuid│
+                            │ pool_c: Ctr │
+                            └──────┬──────┘
+                                   │
+                              on shutdown
+                                   │
+                                   ▼
+                         ~/.local/state/envcounter/
+                              state.json
+```
+
+- **Protocol**: newline-delimited JSON over a Unix socket. Each request is a single JSON line; each response is a single JSON line.
+- **Concurrency**: `Arc<RwLock<HashMap<String, Pool>>>` — the critical section is minimal (integer arithmetic), so a single lock provides excellent performance.
+- **Socket path**: `$XDG_RUNTIME_DIR/envcounter.sock` (typically `/run/user/<uid>/envcounter.sock`).
+- **State path**: `$XDG_STATE_HOME/envcounter/state.json` (typically `~/.local/state/envcounter/state.json`). Written atomically via temp file + rename.
+
+## Command reference
+
+| Command | Description |
+|---|---|
+| `counter new <name> [-s step] [-i initial]` | Create a counter pool |
+| `counter read <name>` | Get current value and increment |
+| `counter seek <name>` | Get current value (no increment) |
+| `counter rm <name>` | Remove a counter |
+| `counter rename <name> <new_name>` | Rename a counter |
+| `counter reset <name>` | Reset counter to initial value |
+| `uuid new <name>` | Create a UUID pool |
+| `uuid read <name>` | Generate a new UUID-v4 |
+| `uuid rm <name>` | Remove a UUID pool |
+| `list [-f table\|json] [-t counter\|uuid]` | List pools |
+
+## License
+
+MIT
